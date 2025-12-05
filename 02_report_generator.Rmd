@@ -1,0 +1,277 @@
+---
+title: "Wind Turbine Anomaly Detection Report"
+author: "Juan Peñas Utrilla"
+date: "2025-12-05"
+output:
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+
+# ==============================================================================
+
+# DATA LOADING
+
+# ==============================================================================
+
+# Script containing generate_synthetic_wind_data()
+
+source("01_data_generator.R")
+
+
+```
+
+## 1. Executive Summary
+
+This report presents an end-to-end, data-driven framework to monitor the performance of a large fleet of wind turbines using synthetic SCADA data.
+
+Specifically, the framework:
+
+- **Automatically identifies turbines showing systematic underperformance, including yaw-like behaviour (right-shifted power curves).**
+- **Enables scalable, periodic screening (monthly or weekly) of hundreds or thousands of turbines.**
+- **Provides clear visual and numerical outputs to support O&M teams in prioritizing corrective actions.**
+
+The underlying dataset is generated with a physics-based simulation engine approximating a Vestas V90 2 MW turbine, including realistic wind distributions, power curves, noise and induced faults.
+
+## 2. Context and Motivation
+
+At first glance, monitoring wind turbine performance may appear to be a straightforward task. However, the real challenge arises when this analysis must be performed **periodically and at scale**, typically on a monthly basis for **hundreds or thousands of individual turbines**.
+
+The core objective is not only to identify potential yaw issues, but more broadly to determine whether each turbine is operating as expected or showing signs of systematic underperformance. In practice, this includes detecting periods — for example, specific summer months where the power curve is consistently shifted to the right — that are indicative of energy losses and possible misalignment or other degradation.
+
+Accurate and continuous performance assessment is critical for several operational and financial reasons:
+
+- It enables **more precise budget planning** and improves **energy yield forecasts**.
+- It reduces uncertainty in financial projections by providing a consistent view of fleet-level performance.
+- It makes it easier to **filter, rank and review turbines** based on their behavior, so that O&M teams can prioritise corrective actions.
+
+Furthermore, the ability to **dynamically correct and update power curves** on a weekly or monthly basis allows for significantly improved production estimates and earlier detection of under performance. In this context, automated anomaly detection and data-driven performance monitoring become essential tools for modern wind farm operation.
+
+
+
+```{r cars}
+# Generate fresh data using the main simulation function
+sim_results <- generate_synthetic_wind_data()
+df <- sim_results$data
+
+# Aggregate at turbine level to identify typical behaviour (average offset, total energy)
+df_summary <- df %>%
+  group_by(turbine_id) %>%
+  summarise(
+    avg_offset = mean(applied_offset, na.rm = TRUE),
+    total_power = sum(active_power, na.rm = TRUE)
+  ) %>%
+  arrange(avg_offset)
+
+```
+
+## 3. Power Curve Analysis (Visual Inspection)
+
+As a first diagnostic step, we inspect the power curve (active power vs wind speed) for a set of representative turbines. This helps to visually understand different performance regimes:
+
+- **Healthy Turbine**: Operates close to the theoretical curve and within the expected tolerance bands.
+
+- **Minor Misalignment / Mild Underperformance**: Slight dispersion or small systematic deviation, often difficult to detect without aggregation.
+
+- **Severe Underperformance (Yaw-like behaviour)**: A clear shift of the operational points to the right (lower power for the same wind speed), consistent with energy losses that would accumulate over months.
+
+```{r pressure, echo=FALSE}
+# Select 3 representative turbines
+# 1. Healthy (lowest average offset)
+wt_healthy <- df_summary %>% head(1) %>% pull(turbine_id)
+
+# 2. Intermediate (median of the table)
+wt_mid_idx <- floor(nrow(df_summary) / 2)
+wt_mid <- df_summary %>% dplyr::slice(wt_mid_idx) %>% pull(turbine_id)
+
+# 3. Severe (highest average offset)
+wt_severe <- df_summary %>% tail(1) %>% pull(turbine_id)
+
+target_wts <- c(wt_healthy, wt_mid, wt_severe)
+
+# Filter data for plotting
+plot_data <- df %>% 
+  filter(turbine_id %in% target_wts) %>%
+  mutate(condition = case_when(
+    turbine_id == wt_healthy ~ "Healthy (Normal)",
+    turbine_id == wt_mid     ~ "Minor Misalignment",
+    turbine_id == wt_severe  ~ "Severe Misalignment"
+  ))
+
+# Power curve with theoretical and band limits
+p <- ggplot(plot_data, aes(x = ws, y = active_power)) +
+  # Theoretical curve and tolerance bands
+  geom_line(aes(y = p_theoretical), color = "black", size = 0.8, linetype = "solid") +
+    geom_line(aes(y = p_lower_band), color = "red", size = 0.8, linetype = "solid") +
+      geom_line(aes(y = p_upper_band), color = "blue", size = 0.8, linetype = "solid") +
+
+
+  # Scatter points (measured data)
+  geom_point(aes(color = condition), alpha = 0.4, size = 0.5) +
+  # Facet 
+  facet_wrap(~condition) +
+  
+  scale_color_manual(values = c("forestgreen", "orange", "firebrick")) +
+  labs(
+    title = "Impact of Yaw Misalignment on Power Curve",
+    subtitle = "Comparison of operational data vs theoretical curve (dashed line)",
+    x = "Wind Speed (m/s)",
+    y = "Active Power (kW)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+
+print(p)
+
+
+ggsave("power_curve_examples.png", plot = p, width = 10, height = 5, dpi = 300)
+
+```
+
+## 4. Model Training and Performance
+
+To move beyond purely visual inspection, we aggregate the synthetic SCADA data at turbine level and train a simple classification model to distinguish healthy vs underperforming turbines.
+
+In this demo, a turbine is labelled as underperforming if its average applied offset exceeds a predefined threshold. From the aggregated data, we derive a small set of features (e.g. average offset and power deviation from the theoretical curve) and train an XGBoost classifier. Model performance is evaluated using the ROC curve and the Area Under the Curve (AUC).
+
+```{r end1, echo=FALSE}
+
+library(tidyverse)
+library(xgboost)
+library(Matrix)
+library(pROC)
+library(moments) 
+library(caret)   
+
+# -------------------------------------------------------------------
+# 4.1 Feature engineering at turbine level
+# -------------------------------------------------------------------
+turbine_features <- df %>%
+  group_by(turbine_id) %>%
+  summarise(
+    avg_offset = mean(applied_offset, na.rm = TRUE),
+    mean_delta = mean(active_power - p_theoretical, na.rm = TRUE),
+    sd_delta   = sd(active_power - p_theoretical, na.rm = TRUE),
+    n_points   = n(),
+    .groups    = "drop"
+  )
+
+# Label: underperforming if average offset exceeds threshold
+offset_threshold <- 0.5
+turbine_features <- turbine_features %>%
+  mutate(is_underperf = as.integer(avg_offset >= offset_threshold))
+
+# -------------------------------------------------------------------
+# 4.2 Train / test split (by turbine)
+# -------------------------------------------------------------------
+set.seed(123)
+all_ids   <- turbine_features$turbine_id
+train_ids <- sample(all_ids, size = floor(0.8 * length(all_ids)))
+test_ids  <- setdiff(all_ids, train_ids)
+
+train_df <- turbine_features %>% filter(turbine_id %in% train_ids)
+test_df  <- turbine_features %>% filter(turbine_id %in% test_ids)
+
+x_train <- as.matrix(select(train_df, avg_offset, mean_delta, sd_delta, n_points))
+x_test  <- as.matrix(select(test_df,  avg_offset, mean_delta, sd_delta, n_points))
+y_train <- train_df$is_underperf
+y_test  <- test_df$is_underperf
+
+dtrain <- xgb.DMatrix(data = x_train, label = y_train)
+dtest  <- xgb.DMatrix(data = x_test,  label = y_test)
+
+# -------------------------------------------------------------------
+# 4.3 XGBoost training and ROC
+# -------------------------------------------------------------------
+params <- list(
+  booster          = "gbtree",
+  objective        = "binary:logistic",
+  eval_metric      = "auc",
+  eta              = 0.05,
+  max_depth        = 6,
+  subsample        = 0.8,
+  colsample_bytree = 0.8
+)
+
+model <- xgb.train(
+  params   = params,
+  data     = dtrain,
+  nrounds  = 150,
+  watchlist = list(train = dtrain, test = dtest),
+  verbose  = 0
+)
+
+# Probabilidades
+pred_prob <- predict(model, dtest)
+
+# -------------------------------------------------------------------
+# 4.4 ROC curve
+# -------------------------------------------------------------------
+roc_obj <- roc(response = y_test, predictor = pred_prob)
+
+plot(
+  roc_obj,
+  main = sprintf("ROC Curve – Underperformance Classifier (AUC = %.3f)", auc(roc_obj))
+)
+
+# -------------------------------------------------------------------
+# 4.5 Confusion matrix (threshold = 0.5) + nice table
+# -------------------------------------------------------------------
+pred_class <- ifelse(pred_prob >= 0.5, 1L, 0L)
+
+cm <- confusionMatrix(
+  factor(pred_class, levels = c(0, 1)),
+  factor(y_test,    levels = c(0, 1)),
+  positive = "1"
+)
+
+# Mostrar la matriz de confusión como tabla formateada en el PDF
+knitr::kable(
+  cm$table,
+  caption = "Confusion Matrix – Underperformance classifier (threshold = 0.5)"
+)
+```
+
+## 5. Practical Considerations for Real-World Deployment
+
+In a real operational environment, the training dataset cannot be generated instantaneously as in a synthetic setup. Instead, turbines must be **systematically monitored and categorized over several months** in order to build a reliable and representative labelled dataset.
+
+This implies that historical SCADA data must be analysed over sufficiently long time windows to robustly distinguish between:
+- Normal operational variability,
+- Temporary disturbances,
+- And persistent underperformance patterns such as yaw misalignment or aerodynamic degradation.
+
+Only once this long-term categorization is available can a machine learning model be trained with a level of confidence suitable for real decision-making.
+
+It is also important to highlight that, under realistic industrial conditions, **perfect classification performance is not expected**. Unlike in controlled simulations, where very clean separations can lead to near-perfect results, real-world data are affected by noise, sensor uncertainty, curtailments, maintenance events and changing atmospheric conditions.
+
+In practice, well-performing anomaly detection models in wind energy typically achieve **high but not perfect discrimination**, with AUC values **close to 0.95 rather than 1.00**. Such performance levels are already extremely valuable from an operational standpoint, as they allow engineers to significantly narrow down the subset of turbines that require detailed inspection, thereby optimizing maintenance resources and reducing energy losses.
+
+
+
+## 6. Appendix: Sample of Turbines
+
+Below is a random sample of six turbines from the simulated wind farm. This provides a quick visual check of how individual turbines behave with respect to the theoretical curve and tolerance bands.
+
+```{r end, echo=FALSE}
+set.seed(42)
+sample_ids <- sample(unique(df$turbine_id), 6)
+
+df %>%
+  filter(turbine_id %in% sample_ids) %>%
+  ggplot(aes(x = ws, y = active_power)) +
+  geom_point(alpha = 0.5, color = "blue", size = 0.1) +
+  geom_line(aes(y = p_theoretical), color = "black", linetype="solid") +
+  geom_line(aes(y = p_upper_band), color = "black", linetype="solid") +
+  geom_line(aes(y = p_lower_band), color = "red", linetype="solid") +
+  facet_wrap(~turbine_id) +
+  theme_light() +
+  labs(title = "Random Sample Inspection")
+  
+```
