@@ -1,1 +1,9 @@
-# wind-turbine-performance
+🌬️ Wind Turbine Yaw Misalignment Detection (End-to-End Pipeline)📋 Project OverviewThis project implements a complete End-to-End Pipeline for detecting Yaw Misalignment and underperformance in wind turbines using synthetic SCADA data.Using a physics-based simulation engine (calibrated for a Vestas V90 2MW turbine), the system generates realistic operational data, injects stochastic faults, and trains a Machine Learning model to identify turbines that are not pointing correctly into the wind.📂 Key Files01_data_generator.R: The core engine. It simulates 6000 turbines, applies fluid dynamics physics (wake/turbulence), performs Feature Engineering, and trains the XGBoost Classifier.02_report_generator.Rmd: An automated reporting tool that generates a professional PDF analysis for stakeholders.Wind_Turbine_Analysis_Report.pdf: Sample output report demonstrating the tool's capabilities.📈 Visual AnalysisThe pipeline automatically detects the "shift to the right" in the Power Curve, which is the signature of yaw misalignment.🧠 Machine Learning ApproachProblem: Identify turbines with >5° yaw misalignment using only 10-minute SCADA data.Model: XGBoost Classifier.Performance: Achieves AUC > 0.95 on synthetic test sets.Features: Dynamic power curve deviation (delta_theoretical), bandwidth usage, and turbulence intensity.🚀 How to Run# Clone the repository
+git clone [https://github.com/jpenas-utrilla/wind-turbine-performance.git](https://github.com/jpenas-utrilla/wind-turbine-performance.git)
+
+# Run the simulation and training pipeline
+Rscript 01_data_generator.R
+
+# Generate the PDF Report
+Rscript -e "rmarkdown::render('02_report_generator.Rmd')"
+👤 AuthorJuan Peñas UtrillaData Engineer & Renewable Energy SpecialistThis project demonstrates capabilities in numerical simulation, data cleaning, and advanced predictive modeling for the renewable energy sector.
