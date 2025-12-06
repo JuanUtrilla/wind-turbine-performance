@@ -32,7 +32,7 @@ wind-turbine-performance/
 ├── Wind_Turbine_Analysis_Report.pdf # Sample output report
 ├── power_curve_examples.png     # Visual assets
 └── README.md                    # Project documentation
-´´´
+```
 
 
 ---
