@@ -32,3 +32,13 @@ wind-turbine-performance/
 ├── Wind_Turbine_Analysis_Report.pdf # Sample output report
 ├── power_curve_examples.png     # Visual assets
 └── README.md                    # Project documentation
+
+
+---
+## 📬 Contact
+
+This project was developed by **Juan Peñas Utrilla**.
+If you have any questions about the methodology or would like to discuss Data Science:
+
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-%230077B5.svg?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/juan-peñas-utrilla-59b244311)
+
